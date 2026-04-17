@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Extractor de Resoluciones a Excel</title>
+    <style>
+        body { 
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+            background-color: #f0f4f8; 
+            display: flex; 
+            justify-content: center; 
+            align-items: center; 
+            height: 100vh; 
+            margin: 0; 
+        }
+        .card { 
+            background: white; 
+            padding: 40px; 
+            border-radius: 12px; 
+            box-shadow: 0 8px 30px rgba(0,0,0,0.08); 
+            width: 100%; 
+            max-width: 450px; 
+            text-align: center; 
+        }
+        h2 { margin-top: 0; color: #333; }
+        p { color: #666; font-size: 15px; margin-bottom: 25px; line-height: 1.5; }
+        
+        .upload-area {
+            border: 2px dashed #007bff;
+            border-radius: 8px;
+            padding: 20px;
+            background-color: #f9fcff;
+            margin-bottom: 20px;
+        }
+
+        input[type="file"] { 
+            width: 100%;
+            cursor: pointer;
+        }
+
+        .btn { 
+            background-color: #007bff; 
+            color: white; 
+            border: none; 
+            padding: 12px 20px; 
+            border-radius: 6px; 
+            cursor: pointer; 
+            font-size: 16px; 
+            font-weight: bold;
+            width: 100%; 
+            transition: all 0.3s ease; 
+        }
+        .btn:hover { background-color: #0056b3; transform: translateY(-1px); }
+        .btn:disabled { background-color: #a0c9f3; cursor: not-allowed; transform: none; }
+        
+        /* Progress Bar */
+        .progress-wrapper {
+            margin-top: 25px;
+            display: none;
+        }
+        .progress-container { 
+            width: 100%; 
+            background-color: #e9ecef; 
+            border-radius: 20px; 
+            overflow: hidden; 
+            height: 22px;
+        }
+        .progress-bar { 
+            width: 0%; 
+            height: 100%; 
+            background-color: #28a745; 
+            text-align: center; 
+            line-height: 22px; 
+            color: white; 
+            font-size: 13px;
+            font-weight: bold;
+            transition: width 0.3s ease; 
+        }
+        
+        .status { 
+            margin-top: 15px; 
+            font-size: 15px; 
+            color: #555; 
+        }
+        
+        /* Spinner */
+        .spinner { 
+            border: 4px solid rgba(0, 0, 0, 0.1); 
+            border-left-color: #007bff; 
+            border-radius: 50%; 
+            width: 35px; 
+            height: 35px; 
+            animation: spin 1s linear infinite; 
+            margin: 15px auto; 
+            display: none; 
+        }
+        @keyframes spin { 
+            0% { transform: rotate(0deg); } 
+            100% { transform: rotate(360deg); } 
+        }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h2>📁 PDF a Excel</h2>
+        <p>Sube tu archivo de resoluciones de alcaldía. El sistema procesará las páginas y generará un Excel estructurado.</p>
+        
+        <form id="uploadForm">
+            <div class="upload-area">
+                <input type="file" id="pdfFile" name="pdf" accept=".pdf" required>
+            </div>
+            <button type="submit" class="btn" id="submitBtn">Generar y Descargar Excel</button>
+        </form>
+        
+        <div class="progress-wrapper" id="progressWrapper">
+            <div class="progress-container">
+                <div class="progress-bar" id="progressBar">0%</div>
+            </div>
+            <div class="spinner" id="spinner"></div>
+            <div class="status" id="statusText">Preparando archivo...</div>
+        </div>
+    </div>
+
+    <script>
+        document.getElementById('uploadForm').addEventListener('submit', function(e) {
+            e.preventDefault();
+            
+            const fileInput = document.getElementById('pdfFile');
+            if (fileInput.files.length === 0) return;
+
+            const file = fileInput.files[0];
+            const formData = new FormData();
+            formData.append('pdf', file);
+
+            const btn = document.getElementById('submitBtn');
+            const progressWrapper = document.getElementById('progressWrapper');
+            const progressBar = document.getElementById('progressBar');
+            const spinner = document.getElementById('spinner');
+            const statusText = document.getElementById('statusText');
+
+            // Preparar UI
+            btn.disabled = true;
+            progressWrapper.style.display = 'block';
+            progressBar.parentElement.style.display = 'block';
+            progressBar.style.width = '0%';
+            progressBar.textContent = '0%';
+            spinner.style.display = 'none';
+            statusText.textContent = 'Subiendo al servidor...';
+            statusText.style.color = '#555';
+
+            const xhr = new XMLHttpRequest();
+            xhr.open('POST', '/', true);
+            xhr.responseType = 'blob'; // Necesario para descargar el Excel binario
+
+            // Evento para rastrear porcentaje de carga del archivo al servidor
+            xhr.upload.onprogress = function(e) {
+                if (e.lengthComputable) {
+                    const percentComplete = Math.round((e.loaded / e.total) * 100);
+                    progressBar.style.width = percentComplete + '%';
+                    progressBar.textContent = percentComplete + '%';
+                    
+                    if (percentComplete === 100) {
+                        progressBar.parentElement.style.display = 'none';
+                        spinner.style.display = 'block';
+                        statusText.innerHTML = '¡Subida completada!<br><strong>Procesando páginas...</strong> esto demorará un poco dependiendo del peso del archivo.';
+                    }
+                }
+            };
+
+            // Evento cuando responde el servidor (se procesó todo)
+            xhr.onload = function() {
+                btn.disabled = false;
+                spinner.style.display = 'none';
+                
+                if (xhr.status === 200) {
+                    statusText.style.color = '#28a745';
+                    statusText.textContent = '¡Proceso exitoso! Descargando Excel...';
+                    
+                    // Forzar descarga del blob recibido (Excel)
+                    const blob = xhr.response;
+                    const link = document.createElement('a');
+                    link.href = window.URL.createObjectURL(blob);
+                    
+                    // Nombre por defecto original
+                    link.download = 'resultado.xlsx';
+                    
+                    // Manejar nombre si el servidor envió un header de disposicion
+                    const disposition = xhr.getResponseHeader('Content-Disposition');
+                    if (disposition && disposition.indexOf('attachment') !== -1) {
+                        const filenameRegex = /filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/;
+                        const matches = filenameRegex.exec(disposition);
+                        if (matches != null && matches[1]) link.download = matches[1].replace(/['"]/g, '');
+                    }
+
+                    document.body.appendChild(link);
+                    link.click();
+                    link.remove();
+                    
+                    // Resetear formulario despues de unos segundos
+                    setTimeout(() => {
+                        progressWrapper.style.display = 'none';
+                        fileInput.value = '';
+                    }, 4000);
+                } else {
+                    statusText.style.color = '#dc3545';
+                    statusText.textContent = 'Ocurrió un error leyendo el documento.';
+                    progressBar.parentElement.style.display = 'none';
+                }
+            };
+
+            xhr.onerror = function() {
+                btn.disabled = false;
+                spinner.style.display = 'none';
+                statusText.style.color = '#dc3545';
+                statusText.textContent = 'Error de conexión. Intenta de nuevo.';
+                progressBar.parentElement.style.display = 'none';
+            };
+
+            xhr.send(formData);
+        });
+    </script>
+</body>
+</html>
