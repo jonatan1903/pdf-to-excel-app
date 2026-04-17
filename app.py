@@ -64,8 +64,12 @@ def index():
                     else:
                         identificacion = None
 
-                    # 4. Artículo
-                    match_art = re.search(r"(?:Art[ií]culo|Art\.)\s*(\d+)", texto_unido, re.IGNORECASE)
+                    # 4. Artículo (solo después de la palabra "CONSIDERANDO")
+                    match_cons = re.search(r"CONSIDERANDO", texto_unido, re.IGNORECASE)
+                    # Si encuentra "CONSIDERANDO", busca el artículo solo en el texto que le sigue
+                    texto_busqueda_art = texto_unido[match_cons.end():] if match_cons else texto_unido
+                    
+                    match_art = re.search(r"(?:Art[ií]culo|Art\.)\s*(\d+)", texto_busqueda_art, re.IGNORECASE)
                     articulo = match_art.group(1) if match_art else None
 
                     # Guardar y limpiar
