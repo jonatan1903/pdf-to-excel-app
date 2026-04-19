@@ -89,27 +89,6 @@
             animation: spin 1s linear infinite;
             margin: 0 auto 10px;
         }
-        .status-box {
-            display: none;
-            text-align: left;
-            margin-top: 18px;
-            border: 1px solid #dfe6ee;
-            border-radius: 8px;
-            padding: 12px;
-            background: #fafcff;
-        }
-        .status-box p {
-            margin: 6px 0;
-            font-size: 14px;
-        }
-        .status-ok {
-            color: #1e8449;
-            font-weight: 600;
-        }
-        .status-error {
-            color: #c0392b;
-            font-weight: 600;
-        }
         @keyframes spin {
             0% { transform: rotate(0deg); }
             100% { transform: rotate(360deg); }
@@ -137,14 +116,7 @@
     
     <div id="loader" class="loader">
         <div class="spinner"></div>
-        <span id="loader-text">Creando job de procesamiento...</span>
-    </div>
-
-    <div id="status-box" class="status-box">
-        <p><strong>Job ID:</strong> <span id="job-id">-</span></p>
-        <p><strong>Estado:</strong> <span id="job-status">-</span></p>
-        <p id="job-stats">Esperando informacion...</p>
-        <p id="job-error"></p>
+        <span id="loader-text">Procesando documento...</span>
     </div>
 </div>
 
@@ -155,23 +127,6 @@
     const loader = document.getElementById('loader');
     const loaderText = document.getElementById('loader-text');
 
-    const statusBox = document.getElementById('status-box');
-    const jobIdEl = document.getElementById('job-id');
-    const jobStatusEl = document.getElementById('job-status');
-    const jobStatsEl = document.getElementById('job-stats');
-    const jobErrorEl = document.getElementById('job-error');
-
-    const POLLING_MS = 3000;
-    let pollTimer = null;
-    let currentJobId = null;
-
-    function stopPolling() {
-        if (pollTimer) {
-            clearInterval(pollTimer);
-            pollTimer = null;
-        }
-    }
-
     function setProcessing(isProcessing, message) {
         processBtn.disabled = isProcessing;
         loader.style.display = isProcessing ? 'block' : 'none';
@@ -179,75 +134,28 @@
         processBtn.textContent = isProcessing ? 'Procesando...' : 'Subir y Procesar';
     }
 
-    function updateStatus(job) {
-        statusBox.style.display = 'block';
-        jobIdEl.textContent = job.job_id || '-';
-        jobStatusEl.textContent = job.status || '-';
-        jobStatusEl.className = (job.status === 'completed')
-            ? 'status-ok'
-            : (job.status === 'failed' ? 'status-error' : '');
-
-        if (job.total_cases !== null && job.total_cases !== undefined) {
-            jobStatsEl.textContent = `Casos: ${job.total_cases} | Validos: ${job.valid_cases ?? 0} | Con error: ${job.error_cases ?? 0}`;
-        } else {
-            jobStatsEl.textContent = 'Procesamiento en curso...';
-        }
-
-        jobErrorEl.textContent = job.error ? `Error: ${job.error}` : '';
-        jobErrorEl.className = job.error ? 'status-error' : '';
-    }
-
-    async function fetchJson(url, options = {}) {
-        const response = await fetch(url, options);
-        const isJson = (response.headers.get('content-type') || '').includes('application/json');
-        const payload = isJson ? await response.json() : {};
-
-        if (!response.ok) {
-            throw new Error(payload.detail || payload.error || 'No se pudo completar la operacion');
-        }
-        return payload;
-    }
-
-    async function createJob(file) {
+    async function uploadAndProcess(file) {
         const formData = new FormData();
         formData.append('file', file);
-        return fetchJson('/jobs', {
+        const response = await fetch('/upload/', {
             method: 'POST',
             body: formData
         });
-    }
 
-    async function getJob(jobId) {
-        return fetchJson(`/jobs/${jobId}`);
-    }
-
-    async function pollJobNow() {
-        if (!currentJobId) {
-            return;
-        }
-
-        const job = await getJob(currentJobId);
-        updateStatus(job);
-
-        if (job.status === 'completed') {
-            stopPolling();
-            setProcessing(false, 'Completado');
-            processBtn.textContent = 'Procesar otro PDF';
-            fileInput.value = '';
-            fileNameDisplay.textContent = 'Ningún archivo seleccionado';
-            processBtn.style.display = 'none';
-
-            if (job.download_url) {
-                window.location.href = job.download_url;
+        if (!response.ok) {
+            let errorMessage = 'No se pudo procesar el documento.';
+            try {
+                const payload = await response.json();
+                if (payload && payload.detail) {
+                    errorMessage = payload.detail;
+                }
+            } catch (jsonError) {
+                console.error('No se pudo parsear error JSON:', jsonError);
             }
-            return;
+            throw new Error(errorMessage);
         }
 
-        if (job.status === 'failed') {
-            stopPolling();
-            setProcessing(false, 'Fallido');
-            throw new Error(job.error || 'El procesamiento fallo en el worker');
-        }
+        return response;
     }
 
     fileInput.addEventListener('change', function(e) {
@@ -266,37 +174,40 @@
             return;
         }
 
-        stopPolling();
-        currentJobId = null;
-        statusBox.style.display = 'none';
-        setProcessing(true, 'Creando job de procesamiento...');
+        setProcessing(true, 'Procesando documento...');
 
         try {
-            const createdJob = await createJob(file);
-            currentJobId = createdJob.job_id;
-            updateStatus(createdJob);
+            const response = await uploadAndProcess(file);
+            const blob = await response.blob();
+            const downloadUrl = window.URL.createObjectURL(blob);
 
-            setProcessing(true, 'Job creado. Procesando en worker...');
-            pollTimer = setInterval(async () => {
-                try {
-                    await pollJobNow();
-                } catch (pollError) {
-                    stopPolling();
-                    setProcessing(false, 'Fallido');
-                    alert(`Ha ocurrido un error: ${pollError.message}`);
+            let outputFilename = file.name.replace(/\.pdf$/i, '_procesado.xlsx');
+            const contentDisposition = response.headers.get('Content-Disposition');
+            if (contentDisposition && contentDisposition.includes('filename=')) {
+                const matches = /filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/.exec(contentDisposition);
+                if (matches && matches[1]) {
+                    outputFilename = matches[1].replace(/['"]/g, '');
                 }
-            }, POLLING_MS);
+            }
 
-            await pollJobNow();
+            const link = document.createElement('a');
+            link.href = downloadUrl;
+            link.download = outputFilename;
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+            window.URL.revokeObjectURL(downloadUrl);
+
+            processBtn.textContent = 'Procesar otro PDF';
+            fileInput.value = '';
+            fileNameDisplay.textContent = 'Ningún archivo seleccionado';
+            processBtn.style.display = 'none';
+            alert('Documento procesado y descargado correctamente');
         } catch (error) {
             console.error('Error:', error);
             alert(`Ha ocurrido un error: ${error.message}`);
-            setProcessing(false, 'Error');
         } finally {
-            if (!currentJobId) {
-                stopPolling();
-                setProcessing(false, 'Listo');
-            }
+            setProcessing(false, 'Listo');
         }
     });
 </script>

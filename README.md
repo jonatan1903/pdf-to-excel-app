@@ -1,47 +1,27 @@
-# PDF to Excel (Async for Render)
+# PDF to Excel (Web Service Unico)
 
-Aplicacion para procesar PDFs institucionales grandes y exportar resultados a Excel.
+Aplicacion para procesar PDFs institucionales y descargar un Excel resultado desde la misma peticion HTTP.
 
 ## Arquitectura
 
-- Web API (FastAPI): recibe PDF, crea job y expone estado/descarga.
-- Worker (RQ): procesa el PDF en segundo plano.
-- Redis: cola y estado de jobs.
-- Storage:
-  - `local` para desarrollo.
-  - `s3` para Render/produccion (S3, R2 u otro endpoint compatible).
+- FastAPI en un solo servicio web.
+- Sin Redis.
+- Sin worker.
+- Sin almacenamiento externo obligatorio.
 
 ## Endpoints
 
-- `POST /jobs`
-  - Recibe `multipart/form-data` con campo `file` (PDF).
-  - Responde con `job_id` y estado inicial `queued`.
-- `GET /jobs/{job_id}`
-  - Devuelve estado: `queued`, `processing`, `completed`, `failed`.
-- `GET /jobs/{job_id}/download`
-  - Descarga el Excel cuando el job esta `completed`.
+- `GET /`
+  - Interfaz web para subir el PDF.
+- `POST /upload/`
+  - Recibe `multipart/form-data` con campo `file`.
+  - Procesa el PDF de forma sincronica y devuelve el Excel para descarga.
 - `GET /health`
-  - Healthcheck para plataforma.
+  - Healthcheck del servicio.
 
 ## Variables de entorno
 
-Copiar `.env.example` y ajustar segun entorno.
-
-### Minimo para local
-
-- `REDIS_URL=redis://localhost:6379/0`
-- `STORAGE_BACKEND=local`
-- `LOCAL_STORAGE_DIR=./storage`
-
-### Minimo para Render
-
-- `REDIS_URL` (inyectado desde keyvalue)
-- `STORAGE_BACKEND=s3`
-- `S3_BUCKET`
-- `S3_REGION` (si aplica)
-- `S3_ENDPOINT_URL` (si usas R2 u otro proveedor)
-- `AWS_ACCESS_KEY_ID`
-- `AWS_SECRET_ACCESS_KEY`
+No hay variables obligatorias para ejecutar el proyecto.
 
 ## Ejecucion local
 
@@ -51,40 +31,29 @@ Copiar `.env.example` y ajustar segun entorno.
 pip install -r requirements.txt
 ```
 
-2. Levantar Redis local (docker):
-
-```bash
-docker run --name redis-pdf -p 6379:6379 -d redis:7
-```
-
-3. Levantar API:
+2. Levantar API:
 
 ```bash
 uvicorn app:app --reload
 ```
 
-4. Levantar worker en otra terminal:
+3. Abrir en navegador:
 
-```bash
-python worker.py
+```text
+http://127.0.0.1:8000
 ```
 
 ## Despliegue en Render
 
-El archivo `render.yaml` crea:
-
-- Servicio web: `pdf-to-excel-web`
-- Servicio worker: `pdf-to-excel-worker`
-- Key-Value Redis: `pdf-to-excel-redis`
+`render.yaml` esta preparado para crear solo un Web Service.
 
 Pasos:
 
 1. Subir repositorio a GitHub.
-2. En Render, crear Blueprint desde el repo.
-3. Completar variables `sync: false` (S3/R2).
-4. Deploy.
+2. En Render, crear servicio desde el repo (o Blueprint).
+3. Confirmar rama `main` y desplegar.
 
-## Nota operativa
+## Limitacion esperada
 
-En Render no uses almacenamiento local para resultados finales cuando tengas web y worker separados.
-Usa siempre `STORAGE_BACKEND=s3` para compartir archivos entre servicios.
+El procesamiento es sincronico: el usuario espera la respuesta mientras se genera el Excel.
+Para cargas muy altas o concurrencia elevada, conviene volver a una arquitectura con cola y worker.
