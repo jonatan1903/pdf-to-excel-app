@@ -57,10 +57,6 @@ class TextNormalizer:
     SYMBOL_REPLACEMENTS = {
         "\u00a0": " ",
         "Nº": "N°",
-        "NO.": "N°",
-        "NO ": "N° ",
-        "NRO.": "N°",
-        "NRO ": "N° ",
         "N-": "N°",
     }
 
@@ -191,24 +187,38 @@ class CaseBuilder:
 class FieldExtractor:
     """Extrae campos con regex tolerantes a variaciones de formato."""
 
+    DOC_TYPES_PATTERN = (
+        r"DOCUMENTO\s+DE\s+IDENTIFICACI[ÓO]N\s+EXTRANJERO"
+        r"|C[ÉE]DULA\s+DE\s+CIUDADAN[IÍ]A"
+        r"|C\.?\s*C\.?"
+        r"|TARJETA\s+DE\s+IDENTIDAD"
+        r"|T\.?\s*I\.?"
+        r"|C[ÉE]DULA\s+DE\s+EXTRANJER[IÍ]A"
+        r"|C\.?\s*E\.?"
+        r"|DNI"
+        r"|PASAPORTE"
+        r"|RUT"
+        r"|RUC"
+    )
+
     NAME_PATTERNS = [
         re.compile(
-            r"\bCIUDADAN[OA]\s*\(?A\)?\s+([A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑ ]{8,100}?)(?=,?\s+IDENTIFICAD[OA]|,?\s+PORTADOR|,?\s+QUIEN|,?\s+CON\s+(?:CEDULA|C\.?\s*C|TARJETA|DNI|CE|PASAPORTE))"
+            r"\bCIUDADAN[OA]\s*\(?A\)?\s+([A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑ°'\- ]{8,100}?)(?=,?\s+IDENTIFICAD[OA]|,?\s+PORTADOR|,?\s+QUIEN|,?\s+CON\s+(?:CEDULA|C\.?\s*C|TARJETA|DNI|CE|PASAPORTE|DOCUMENTO))"
         ),
         re.compile(
-            r"\bA\s+NOMBRE\s+DE\s+([A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑ ]{8,100}?)(?=,|\.|\s+IDENTIFICAD[OA])"
+            r"\bA\s+NOMBRE\s+DE\s+([A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑ°'\- ]{8,100}?)(?=,|\.|\s+IDENTIFICAD[OA])"
         ),
         re.compile(
-            r"\bINFRACTOR(?:A)?\s*[:\-]\s*([A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑ ]{8,100}?)(?=,|\.|\s+IDENTIFICAD[OA])"
+            r"\bINFRACTOR(?:A)?\s*[:\-]\s*([A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑ°'\- ]{8,100}?)(?=,|\.|\s+IDENTIFICAD[OA])"
         ),
     ]
 
     DOC_ID_PATTERNS = [
         re.compile(
-            r"\bIDENTIFICAD[OA]\s*\(?A\)?\s*(?:CON\s+)?(?P<doc>C[ÉE]DULA\s+DE\s+CIUDADAN[IÍ]A|C\.?\s*C\.?|TARJETA\s+DE\s+IDENTIDAD|T\.?\s*I\.?|C[ÉE]DULA\s+DE\s+EXTRANJER[IÍ]A|C\.?\s*E\.?|DNI|PASAPORTE|RUT|RUC)\s*(?:N(?:RO|O|°|º)?\.?\s*)?(?P<id>[A-Z0-9\.\-]{5,25})"
+            rf"\bIDENTIFICAD[OA]\s*\(?A\)?\s*(?:CON\s+)?(?P<doc>{DOC_TYPES_PATTERN})\s*(?:N(?:RO|O|°|º)?\.?\s*)?(?P<id>[A-Z0-9\.\-]{{1,25}})"
         ),
         re.compile(
-            r"\b(?P<doc>C[ÉE]DULA\s+DE\s+CIUDADAN[IÍ]A|C\.?\s*C\.?|TARJETA\s+DE\s+IDENTIDAD|T\.?\s*I\.?|C[ÉE]DULA\s+DE\s+EXTRANJER[IÍ]A|C\.?\s*E\.?|DNI|PASAPORTE|RUT|RUC)\s*(?:N(?:RO|O|°|º)?\.?\s*)?(?P<id>[A-Z0-9\.\-]{5,25})"
+            rf"\b(?P<doc>{DOC_TYPES_PATTERN})\s*(?:N(?:RO|O|°|º)?\.?\s*)?(?P<id>[A-Z0-9\.\-]{{1,25}})"
         ),
     ]
 
@@ -238,6 +248,7 @@ class FieldExtractor:
         )
         key = key.replace(" ", "").replace(".", "")
         mapping = {
+            "DOCUMENTODEIDENTIFICACIONEXTRANJERO": "CE",
             "CEDULADECIUDADANIA": "CC",
             "CC": "CC",
             "TARJETADEIDENTIDAD": "TI",
@@ -274,6 +285,8 @@ class FieldExtractor:
             if not match:
                 continue
             candidate = re.sub(r"\s+", " ", match.group(1)).strip(" ,.;:-")
+            # OCR frecuente: MOREN° -> MORENO, CAN° -> CANO.
+            candidate = candidate.replace("°", "O").replace("º", "O")
             if cls._looks_like_name(candidate):
                 return candidate
         return None
@@ -286,8 +299,12 @@ class FieldExtractor:
                 continue
             doc_type = cls._normalize_doc_type(match.group("doc"))
             doc_id = cls._sanitize_id(doc_type, match.group("id"))
+            if doc_id == "0":
+                return doc_type, doc_id
             if len(doc_id) >= 5:
                 return doc_type, doc_id
+            if doc_type:
+                return doc_type, None
         return None, None
 
     @classmethod
@@ -312,6 +329,10 @@ class Validator:
 
     @staticmethod
     def validate(record: CaseRecord) -> CaseRecord:
+        zero_id = bool(record.numero_identificacion) and bool(
+            re.fullmatch(r"0+", str(record.numero_identificacion).strip())
+        )
+
         missing_fields = []
         if not record.resolucion:
             missing_fields.append("Resolucion")
@@ -324,11 +345,18 @@ class Validator:
         if not record.articulo:
             missing_fields.append("Articulo")
 
+        errors = []
         if missing_fields:
+            errors.append(f"Faltan campos: {', '.join(missing_fields)}")
+        if zero_id:
+            errors.append("Documento de identificacion en cero (0) en fuente")
+
+        if errors:
             record.estado = "con error"
-            record.error_msg = f"Faltan campos: {', '.join(missing_fields)}"
+            record.error_msg = " | ".join(errors)
         else:
             record.estado = "valido"
+            record.error_msg = None
         return record
 
 
