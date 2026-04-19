@@ -4,3 +4,6 @@ openpyxl
 fastapi
 uvicorn
 python-multipart
+redis
+rq
+boto3

@@ -1,92 +1,174 @@
-import os
-import tempfile
 import logging
-from fastapi import FastAPI, UploadFile, File, BackgroundTasks, HTTPException
+import os
+import re
+import tempfile
+import uuid
+from pathlib import Path
+from typing import Any, Dict
+
+from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
 
-from src.pdf_processor import DocProcessingPipeline
+from src.job_store import create_job, get_job, update_job
+from src.jobs import process_pdf_job
+from src.queue_service import job_queue
+from src.storage import storage_client
 
-# Configure logger
-logging.basicConfig(level=logging.INFO)
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="PDF to Excel Converter", description="Procesa resoluciones en PDF a Excel")
+PDF_MIME_TYPE = "application/pdf"
+EXCEL_MIME_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
-def cleanup_files(*file_paths):
-    """Elimina los archivos temporales después de enviar la respuesta."""
-    for path in file_paths:
-        if os.path.exists(path):
-            try:
-                os.remove(path)
-                logger.info(f"Archivo temporal eliminado: {path}")
-            except Exception as e:
-                logger.error(f"Error eliminando archivo {path}: {e}")
+app = FastAPI(
+    title="PDF to Excel Converter",
+    description="Procesamiento asincrono de resoluciones PDF hacia Excel",
+)
+
+
+def _safe_remove_file(path: str) -> None:
+    if not path:
+        return
+    if os.path.exists(path):
+        try:
+            os.remove(path)
+        except OSError:
+            logger.exception("No se pudo eliminar archivo temporal: %s", path)
+
+
+def _build_output_filename(original_filename: str) -> str:
+    stem = Path(original_filename).stem or "resultado"
+    safe_stem = re.sub(r"[^A-Za-z0-9_-]", "_", stem).strip("_") or "resultado"
+    return f"{safe_stem}_procesado.xlsx"
+
+
+def _job_to_response(job: Dict[str, Any]) -> Dict[str, Any]:
+    payload = {
+        "job_id": job.get("job_id"),
+        "status": job.get("status"),
+        "original_filename": job.get("original_filename"),
+        "output_filename": job.get("output_filename"),
+        "created_at": job.get("created_at"),
+        "updated_at": job.get("updated_at"),
+        "total_cases": job.get("total_cases"),
+        "valid_cases": job.get("valid_cases"),
+        "error_cases": job.get("error_cases"),
+        "error": job.get("error") or None,
+    }
+    if payload["status"] == "completed" and payload["job_id"]:
+        payload["download_url"] = f"/jobs/{payload['job_id']}/download"
+    return payload
+
 
 @app.get("/", response_class=HTMLResponse)
-def get_index():
-    with open("index.html", "r", encoding="utf-8") as f:
-        html_content = f.read()
-    return html_content
+def get_index() -> str:
+    with open("index.html", "r", encoding="utf-8") as handle:
+        return handle.read()
 
-@app.post("/upload/")
-async def upload_file(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
-    """Recibe un PDF, lo procesa y devuelve un archivo Excel para descargar."""
 
+@app.get("/health")
+def health() -> Dict[str, str]:
+    return {"status": "ok"}
+
+
+@app.post("/jobs")
+async def create_processing_job(file: UploadFile = File(...)) -> Dict[str, Any]:
     if not file.filename:
         raise HTTPException(status_code=400, detail="Debe adjuntar un archivo PDF")
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="El archivo debe tener extension .pdf")
 
-    # Guardar en disco por chunks para no cargar archivos grandes en memoria.
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_in:
-        while True:
-            chunk = await file.read(1024 * 1024)
-            if not chunk:
-                break
-            tmp_in.write(chunk)
-        tmp_in_path = tmp_in.name
+    job_id = str(uuid.uuid4())
+    output_filename = _build_output_filename(file.filename)
+    input_key = f"uploads/{job_id}.pdf"
+    output_key = f"results/{job_id}.xlsx"
 
-    logger.info(f"Documento temporal guardado en: {tmp_in_path}")
-    
-    # Archivo temporal de salida para el Excel
-    tmp_out_path = tmp_in_path.replace(".pdf", "_report.xlsx")
+    temp_input_path = ""
+    enqueued = False
 
     try:
-        # Ejecutar el pipeline de procesamiento
-        pipeline = DocProcessingPipeline(tmp_in_path, tmp_out_path)
-        processed_records = pipeline.run()
-        if not processed_records:
-            raise HTTPException(status_code=422, detail="No se detectaron casos procesables en el PDF")
-        if not os.path.exists(tmp_out_path):
-            raise HTTPException(status_code=500, detail="No se genero el archivo de salida")
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_input:
+            temp_input_path = temp_input.name
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                temp_input.write(chunk)
 
-        validos = sum(1 for record in processed_records if record.estado == "valido")
-        logger.info(
-            "Documento procesado: %s casos, %s validos, %s con error",
-            len(processed_records),
-            validos,
-            len(processed_records) - validos,
+        storage_client.upload_file(temp_input_path, input_key, content_type=PDF_MIME_TYPE)
+        create_job(
+            job_id,
+            original_filename=file.filename,
+            output_filename=output_filename,
+            input_key=input_key,
+            output_key=output_key,
         )
 
-        # Configurar la tarea de limpieza en segundo plano (se ejecuta tras el FileResponse)
-        background_tasks.add_task(cleanup_files, tmp_in_path, tmp_out_path)
+        job_queue.enqueue(process_pdf_job, job_id, job_id=job_id)
+        enqueued = True
 
-        # Devolver el archivo Excel generado
-        return FileResponse(
-            path=tmp_out_path, 
-            filename=file.filename.replace(".pdf", "_procesado.xlsx"),
-            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
-    except HTTPException:
-        cleanup_files(tmp_in_path, tmp_out_path)
-        raise
-    except Exception as e:
-        logger.error(f"Error procesando documento: {e}")
-        cleanup_files(tmp_in_path, tmp_out_path)
-        raise HTTPException(status_code=500, detail="Fallo interno durante el procesamiento")
+        job = get_job(job_id)
+        if not job:
+            raise RuntimeError("No se pudo recuperar el job despues de crearlo")
+
+        return _job_to_response(job)
+    except Exception as exc:
+        logger.exception("No se pudo crear job asincrono")
+        existing_job = get_job(job_id)
+        if existing_job:
+            update_job(job_id, status="failed", error=str(exc))
+        if not enqueued:
+            try:
+                storage_client.delete_key(input_key)
+            except Exception:
+                logger.warning("No se pudo eliminar input_key fallido: %s", input_key)
+        raise HTTPException(status_code=500, detail="No fue posible crear el job de procesamiento")
     finally:
         await file.close()
+        _safe_remove_file(temp_input_path)
+
+
+@app.get("/jobs/{job_id}")
+def get_job_status(job_id: str) -> Dict[str, Any]:
+    job = get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job no encontrado")
+    return _job_to_response(job)
+
+
+@app.get("/jobs/{job_id}/download")
+def download_job_result(job_id: str, background_tasks: BackgroundTasks):
+    job = get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job no encontrado")
+
+    if job.get("status") != "completed":
+        raise HTTPException(status_code=409, detail="El job aun no esta completado")
+
+    output_key = job.get("output_key")
+    if not output_key:
+        raise HTTPException(status_code=500, detail="No hay salida asociada para este job")
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as temp_output:
+        temp_output_path = temp_output.name
+
+    try:
+        storage_client.download_file(output_key, temp_output_path)
+    except Exception:
+        _safe_remove_file(temp_output_path)
+        logger.exception("No se pudo descargar resultado del storage para job %s", job_id)
+        raise HTTPException(status_code=500, detail="No se pudo recuperar el archivo de salida")
+
+    background_tasks.add_task(_safe_remove_file, temp_output_path)
+    return FileResponse(
+        path=temp_output_path,
+        filename=job.get("output_filename") or "resultado_procesado.xlsx",
+        media_type=EXCEL_MIME_TYPE,
+    )
+
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=True)

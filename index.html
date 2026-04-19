@@ -89,6 +89,27 @@
             animation: spin 1s linear infinite;
             margin: 0 auto 10px;
         }
+        .status-box {
+            display: none;
+            text-align: left;
+            margin-top: 18px;
+            border: 1px solid #dfe6ee;
+            border-radius: 8px;
+            padding: 12px;
+            background: #fafcff;
+        }
+        .status-box p {
+            margin: 6px 0;
+            font-size: 14px;
+        }
+        .status-ok {
+            color: #1e8449;
+            font-weight: 600;
+        }
+        .status-error {
+            color: #c0392b;
+            font-weight: 600;
+        }
         @keyframes spin {
             0% { transform: rotate(0deg); }
             100% { transform: rotate(360deg); }
@@ -108,7 +129,7 @@
     
     <div class="upload-area">
         <input type="file" id="file-input" accept="application/pdf">
-        <label for="file-input" class="file-label">📄 Seleccionar documento PDF</label>
+        <label for="file-input" class="file-label">Seleccionar documento PDF</label>
         <span id="file-name">Ningún archivo seleccionado</span>
     </div>
 
@@ -116,7 +137,14 @@
     
     <div id="loader" class="loader">
         <div class="spinner"></div>
-        Procesando documento, por favor espere...
+        <span id="loader-text">Creando job de procesamiento...</span>
+    </div>
+
+    <div id="status-box" class="status-box">
+        <p><strong>Job ID:</strong> <span id="job-id">-</span></p>
+        <p><strong>Estado:</strong> <span id="job-status">-</span></p>
+        <p id="job-stats">Esperando informacion...</p>
+        <p id="job-error"></p>
     </div>
 </div>
 
@@ -125,8 +153,103 @@
     const fileNameDisplay = document.getElementById('file-name');
     const processBtn = document.getElementById('process-btn');
     const loader = document.getElementById('loader');
+    const loaderText = document.getElementById('loader-text');
 
-    // Update filename when file is selected
+    const statusBox = document.getElementById('status-box');
+    const jobIdEl = document.getElementById('job-id');
+    const jobStatusEl = document.getElementById('job-status');
+    const jobStatsEl = document.getElementById('job-stats');
+    const jobErrorEl = document.getElementById('job-error');
+
+    const POLLING_MS = 3000;
+    let pollTimer = null;
+    let currentJobId = null;
+
+    function stopPolling() {
+        if (pollTimer) {
+            clearInterval(pollTimer);
+            pollTimer = null;
+        }
+    }
+
+    function setProcessing(isProcessing, message) {
+        processBtn.disabled = isProcessing;
+        loader.style.display = isProcessing ? 'block' : 'none';
+        loaderText.textContent = message || 'Procesando...';
+        processBtn.textContent = isProcessing ? 'Procesando...' : 'Subir y Procesar';
+    }
+
+    function updateStatus(job) {
+        statusBox.style.display = 'block';
+        jobIdEl.textContent = job.job_id || '-';
+        jobStatusEl.textContent = job.status || '-';
+        jobStatusEl.className = (job.status === 'completed')
+            ? 'status-ok'
+            : (job.status === 'failed' ? 'status-error' : '');
+
+        if (job.total_cases !== null && job.total_cases !== undefined) {
+            jobStatsEl.textContent = `Casos: ${job.total_cases} | Validos: ${job.valid_cases ?? 0} | Con error: ${job.error_cases ?? 0}`;
+        } else {
+            jobStatsEl.textContent = 'Procesamiento en curso...';
+        }
+
+        jobErrorEl.textContent = job.error ? `Error: ${job.error}` : '';
+        jobErrorEl.className = job.error ? 'status-error' : '';
+    }
+
+    async function fetchJson(url, options = {}) {
+        const response = await fetch(url, options);
+        const isJson = (response.headers.get('content-type') || '').includes('application/json');
+        const payload = isJson ? await response.json() : {};
+
+        if (!response.ok) {
+            throw new Error(payload.detail || payload.error || 'No se pudo completar la operacion');
+        }
+        return payload;
+    }
+
+    async function createJob(file) {
+        const formData = new FormData();
+        formData.append('file', file);
+        return fetchJson('/jobs', {
+            method: 'POST',
+            body: formData
+        });
+    }
+
+    async function getJob(jobId) {
+        return fetchJson(`/jobs/${jobId}`);
+    }
+
+    async function pollJobNow() {
+        if (!currentJobId) {
+            return;
+        }
+
+        const job = await getJob(currentJobId);
+        updateStatus(job);
+
+        if (job.status === 'completed') {
+            stopPolling();
+            setProcessing(false, 'Completado');
+            processBtn.textContent = 'Procesar otro PDF';
+            fileInput.value = '';
+            fileNameDisplay.textContent = 'Ningún archivo seleccionado';
+            processBtn.style.display = 'none';
+
+            if (job.download_url) {
+                window.location.href = job.download_url;
+            }
+            return;
+        }
+
+        if (job.status === 'failed') {
+            stopPolling();
+            setProcessing(false, 'Fallido');
+            throw new Error(job.error || 'El procesamiento fallo en el worker');
+        }
+    }
+
     fileInput.addEventListener('change', function(e) {
         if (e.target.files.length > 0) {
             fileNameDisplay.textContent = e.target.files[0].name;
@@ -139,72 +262,41 @@
 
     processBtn.addEventListener('click', async function() {
         const file = fileInput.files[0];
-        if (!file) return;
+        if (!file) {
+            return;
+        }
 
-        // UI changes for loading state
-        processBtn.disabled = true;
-        processBtn.textContent = 'Procesando...';
-        loader.style.display = 'block';
-
-        const formData = new FormData();
-        formData.append('file', file);
+        stopPolling();
+        currentJobId = null;
+        statusBox.style.display = 'none';
+        setProcessing(true, 'Creando job de procesamiento...');
 
         try {
-            const response = await fetch('/upload/', {
-                method: 'POST',
-                body: formData
-            });
+            const createdJob = await createJob(file);
+            currentJobId = createdJob.job_id;
+            updateStatus(createdJob);
 
-            if (!response.ok) {
-                let errorMessage = 'Error al procesar el archivo.';
+            setProcessing(true, 'Job creado. Procesando en worker...');
+            pollTimer = setInterval(async () => {
                 try {
-                    const payload = await response.json();
-                    if (payload && payload.detail) {
-                        errorMessage = payload.detail;
-                    }
-                } catch (_) {
-                    // Si no viene JSON, mantenemos mensaje genérico.
+                    await pollJobNow();
+                } catch (pollError) {
+                    stopPolling();
+                    setProcessing(false, 'Fallido');
+                    alert(`Ha ocurrido un error: ${pollError.message}`);
                 }
-                throw new Error(errorMessage);
-            }
+            }, POLLING_MS);
 
-            // Descargar automáticamente el excel
-            const blob = await response.blob();
-            const downloadUrl = window.URL.createObjectURL(blob);
-            
-            // Extraer el nombre sugerido desde el Header si existe
-            let outputFilename = file.name.replace('.pdf', '_procesado.xlsx');
-            const contentDisposition = response.headers.get('Content-Disposition');
-            if (contentDisposition && contentDisposition.indexOf('filename=') !== -1) {
-                const matches = /filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/.exec(contentDisposition);
-                if (matches != null && matches[1]) {
-                    outputFilename = matches[1].replace(/['"]/g, '');
-                }
-            }
-
-            const a = document.createElement('a');
-            a.href = downloadUrl;
-            a.download = outputFilename;
-            document.body.appendChild(a);
-            a.click();
-            a.remove();
-            
-            // Clean memory
-            window.URL.revokeObjectURL(downloadUrl);
-
-            alert('✅ Archivo procesado y descargado exitosamente');
-
+            await pollJobNow();
         } catch (error) {
             console.error('Error:', error);
             alert(`Ha ocurrido un error: ${error.message}`);
+            setProcessing(false, 'Error');
         } finally {
-            // Reset UI
-            processBtn.disabled = false;
-            processBtn.textContent = 'Subir y Procesar';
-            loader.style.display = 'none';
-            fileInput.value = '';
-            fileNameDisplay.textContent = 'Ningún archivo seleccionado';
-            processBtn.style.display = 'none';
+            if (!currentJobId) {
+                stopPolling();
+                setProcessing(false, 'Listo');
+            }
         }
     });
 </script>
