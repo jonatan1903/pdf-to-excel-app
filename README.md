@@ -47,6 +47,14 @@ http://127.0.0.1:8000
 
 `render.yaml` esta preparado para crear solo un Web Service.
 
+Comando de inicio recomendado en Render:
+
+```text
+gunicorn app:app
+```
+
+Nota: en Render no incluyas el simbolo `$` al inicio del comando.
+
 Pasos:
 
 1. Subir repositorio a GitHub.

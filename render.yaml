@@ -4,7 +4,7 @@ services:
     env: python
     autoDeploy: true
     buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
+    startCommand: gunicorn app:app
     healthCheckPath: /health
     envVars:
       - key: PYTHON_VERSION
