@@ -153,12 +153,15 @@ class CaseBuilder:
         # Si ya habia caso abierto, cerrarlo con el texto previo al siguiente encabezado.
         if self._current_resolution:
             prefix = text[: detector_matches[0]["start"]]
-            self._append_current_text(prefix)
-            end_page = page_number - 1 if detector_matches[0]["start"] < 1000 else page_number
+            match_is_near_page_start = detector_matches[0]["start"] < 1000
+            if not match_is_near_page_start:
+                self._append_current_text(prefix)
+            end_page = page_number - 1 if match_is_near_page_start else page_number
             self._close_current_case(end_page)
 
         for idx, match_info in enumerate(detector_matches):
-            start = match_info["start"]
+            # El encabezado con "Medellin fecha" suele estar antes de ORDEN DE...
+            start = 0 if idx == 0 and match_info["start"] < 1000 else match_info["start"]
             has_next = idx < len(detector_matches) - 1
             next_start = detector_matches[idx + 1]["start"] if has_next else None
             segment = text[start:next_start] if has_next else text[start:]
@@ -250,12 +253,13 @@ class FieldExtractor:
     ]
 
     FINE_VALUE_PATTERNS = [
+        re.compile(r"\bEQUIVALE\s+A\s*\(?\s*\$?\s*([\d\.,]+)"),
         re.compile(r"\bPOR\s+VALOR\s+DE\s*\(?\s*\$?\s*([\d\.,]+)"),
         re.compile(r"\bVALOR\s+DE\s+LA\s+MULTA\s*[:\-]?\s*\$?\s*([\d\.,]+)"),
     ]
 
     DATE_PATTERN = re.compile(
-        r"\bMEDELL[IÍ]N\s+(\d{1,2})\s*/\s*([A-ZÁÉÍÓÚÑ]+)\s*/\s*(\d{4})"
+        r"\bMEDELLIN\s+(\d{1,2})\s*/\s*([A-Z]+)\s*/\s*(\d{4})"
     )
 
     INVALID_NAME_TOKENS = {
@@ -344,6 +348,14 @@ class FieldExtractor:
                 return f"ART. {match.group(1)}"
         return None
 
+    @staticmethod
+    def _strip_accents(text: str) -> str:
+        return "".join(
+            char
+            for char in unicodedata.normalize("NFD", text)
+            if unicodedata.category(char) != "Mn"
+        )
+
     @classmethod
     def _extract_fine_value(cls, text: str) -> Optional[str]:
         for pattern in cls.FINE_VALUE_PATTERNS:
@@ -355,15 +367,12 @@ class FieldExtractor:
 
     @classmethod
     def _extract_initial_date(cls, text: str) -> Optional[pd.Timestamp]:
-        match = cls.DATE_PATTERN.search(text)
+        normalized_text = cls._strip_accents(text)
+        match = cls.DATE_PATTERN.search(normalized_text)
         if not match:
             return None
 
-        month_name = "".join(
-            char
-            for char in unicodedata.normalize("NFD", match.group(2))
-            if unicodedata.category(char) != "Mn"
-        )
+        month_name = cls._strip_accents(match.group(2))
         month = cls.MESES.get(month_name)
         if not month:
             return None
