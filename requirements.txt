@@ -1,5 +1,7 @@
-flask
-pymupdf
+PyMuPDF
 pandas
 openpyxl
+fastapi
+uvicorn
+python-multipart
 gunicorn
